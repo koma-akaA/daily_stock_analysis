@@ -106,7 +106,7 @@ def validate_bars(frame, expected_date, crypto=False):
     return df
 
 
-def technical_facts(df, symbol):
+def technical_facts(df, symbol, reference_price=None):
     if len(df) < 60:
         return None  # Upstream falls back MA60 to MA20; this report requires real MA60.
     analyzer = StockTrendAnalyzer()
@@ -131,8 +131,15 @@ def technical_facts(df, symbol):
         trend = "左侧观察：价格低于MA60，尚不能确认反转"
     else:
         trend = "震荡/过渡：左右侧证据不一致"
-    supports = [number(x) for x in result.support_levels if number(x) is not None and 0 < float(x) < close]
-    resistances = [number(x) for x in result.resistance_levels if number(x) is not None and float(x) > close]
+    # The upstream strategy only records bullish MA support. A spot swing report
+    # also needs observable range candidates when price is below those averages.
+    price_reference = number(reference_price) or close
+    candidates = [result.ma5, result.ma10, result.ma20, result.ma60,
+                  float(df.low.tail(20).min()), float(df.high.tail(20).max())]
+    supports = [number(x) for x in [*result.support_levels, *candidates]
+                if number(x) is not None and 0 < float(x) < price_reference]
+    resistances = [number(x) for x in [*result.resistance_levels, *candidates]
+                   if number(x) is not None and float(x) > price_reference]
     support = max(supports) if supports else None
     resistance = min(resistances) if resistances else None
     true_range = pd.concat([df.high - df.low, (df.high - df.close.shift()).abs(),
@@ -144,6 +151,8 @@ def technical_facts(df, symbol):
                   "volume": number(df.iloc[-1].volume), "volume_status": result.volume_status.value,
                   "basis": "已完成日K；RSI为原项目Wilder EMA(6/12/24)，MACD(12/26/9)，股票复权日线",
                   "daily_as_of": df.iloc[-1].date.date().isoformat()})
+    facts["levels_basis"] = "均线及近20根已完成日K高低点的最近候选；非确定性底部/顶部"
+    facts["levels_reference_price"] = price_reference
     return facts
 
 
@@ -226,7 +235,7 @@ class PersonalInvestmentReport:
                                  "change_pct": (float(df.iloc[-1].close) / float(df.iloc[-2].close) - 1) * 100 if len(df) > 1 else None,
                                  "as_of": self.session["close_utc"], "source": f"https://finance.yahoo.com/quote/{symbol}/history/",
                                  "basis": "最近美股已收盘复权日线；涨跌对前一交易日；并非实时价"}
-            item["technicals"] = technical_facts(df, symbol)
+            item["technicals"] = technical_facts(df, symbol, (item["quote"] or {}).get("price"))
         except Exception as exc:
             item["errors"].append("日线/技术指标不可用：" + type(exc).__name__)
         try:
@@ -287,6 +296,8 @@ class PersonalInvestmentReport:
                 "禁止编造行情/新闻/事件/财报/情绪/确定性买卖结论。技术形态不是买卖指令。"
                 "不要输出任何阿拉伯数字或数值（包括重复价格和指标数值）；可用文字描述均线和量价关系。"
                 "加密资产不可套股票PE。未给连续财报，不得声称基本面改善/恶化。无新闻不得写最新利好。"
+                "若fundamentals含PE或P/S，valuation应解释已有估值快照及局限，不能将缺经营数据误认为没有估值数据。"
+                "risk应综合已有量价/趋势/估值说明风险；long_term可列待验证条件，不能无视已有证据。"
                 "仅返回JSON对象：以下每个键对应{\"text\":\"中文解读，最多150字；不确定时数据不可用\","
                 "\"evidence\":[\"支撑该解读的证据键\"]}。所有证据键必须来自允许列表；"
                 "无法支持时text写数据不可用且evidence为空。若quote或technicals可用，必须为swing和conclusion给出有证据的定性观察。"
@@ -317,6 +328,8 @@ class PersonalInvestmentReport:
                 result["valuation"] = {"text": "数据不可用：缺少估值/市值指标，不能判定便宜或昂贵", "evidence": []}
             if facts["technicals"] and not (result["swing"]["evidence"] and result["conclusion"]["evidence"]):
                 raise ValueError("AI did not ground its technical interpretation")
+            if facts["technicals"] and not result["risk"]["evidence"]:
+                raise ValueError("AI did not ground its risk interpretation")
             return result
         except Exception as exc:
             # Do not persist raw SDK exceptions: some HTTP clients include request credentials.
@@ -377,6 +390,7 @@ def render_report(report, full=False, history_url=""):
                           "MACD DIF/DEA/柱：" + " / ".join(display(tech.get(x)) for x in ("macd_dif", "macd_dea", "macd_bar")),
                           f"成交量：{display(tech.get('volume'))}；日量/含当日5日均量 {display(tech.get('volume_ratio_5d'))}；{tech.get('volume_status', UNAVAILABLE)}",
                           f"指标时点：{tech.get('daily_as_of', UNAVAILABLE)}；{tech.get('basis', UNAVAILABLE)}"])
+            lines.append(f"价位方法：{tech.get('levels_basis', UNAVAILABLE)}；筛选参考价 {display(tech.get('levels_reference_price'), ' USD')}")
         news = item["news"] if full else item["news"][:1]
         lines.append("重要新闻：" + ("；".join(f"[{safe_text(n['title'], 180 if full else 90)}]({safe_url(n['url'])})（{n['published_at']}）" for n in news) if news else UNAVAILABLE + "：未取得近三日带日期来源"))
         lines.append("Reddit / X：" + (safe_text(item["social"], 2500 if full else 70) if item["social"] else UNAVAILABLE))

@@ -57,6 +57,20 @@ def test_ma60_never_uses_ma20_fallback():
     assert '未出现新金叉' in facts['double_ma']
 
 
+def test_range_support_and_resistance_remain_available_below_moving_averages():
+    df = bars(90)
+    # Synthetic completed candle breaks below all MAs but remains above its low.
+    df.loc[89, ['open', 'high', 'low', 'close']] = [180, 182, 147, 150]
+    facts = technical_facts(df, 'CRCL')
+    assert facts['support'] == 147
+    assert 150 < facts['resistance'] < df.high.tail(20).max()
+    assert 0 < facts['stop_reference'] < facts['support']
+    # Crypto levels are filtered around the current spot snapshot, not a stale daily close.
+    spot = technical_facts(df, 'BTC', reference_price=145)
+    assert spot['support'] is None
+    assert spot['resistance'] == 147
+
+
 def test_crypto_identity_is_explicit():
     with pytest.raises(KeyError):
         CryptoFetcher().daily('CRCL')
