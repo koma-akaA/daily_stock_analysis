@@ -46,7 +46,7 @@ jobs:
       - name: 安装已锁定依赖
         run: python -m pip install -r requirements-actions.lock
       - name: 验证关键路径
-        run: python -m pytest -q tests/test_personal_investment.py tests/test_pushplus_safety.py tests/test_investment_history.py
+        run: python -m pytest -q tests/test_personal_investment.py tests/test_pushplus_safety.py tests/test_investment_history.py tests/test_public_news_service.py
       - name: 分析、归档与推送
         env:
           # Keys only enter this step. No forks/PRs trigger this workflow.
@@ -66,6 +66,7 @@ jobs:
           SOCIAL_SENTIMENT_API_KEY: ${{ secrets.SOCIAL_SENTIMENT_API_KEY || secrets.REDDIT_SECRET }}
           SOCIAL_SENTIMENT_API_URL: ${{ secrets.SOCIAL_SENTIMENT_API_URL || vars.SOCIAL_SENTIMENT_API_URL || 'https://api.adanos.org' }}
           INVESTMENT_ASSETS: ${{ vars.INVESTMENT_ASSETS || 'CRCL,HOOD,COIN,TSLA,BTC,ETH' }}
+          PUBLIC_NEWS_FALLBACK_ENABLED: ${{ vars.PUBLIC_NEWS_FALLBACK_ENABLED || 'true' }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_MODE: ${{ inputs.mode || 'analysis' }}
           INPUT_NO_NOTIFY: ${{ inputs.no_notify }}

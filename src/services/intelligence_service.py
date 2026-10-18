@@ -10,7 +10,7 @@ import logging
 import re
 import socket
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
@@ -629,13 +629,19 @@ class IntelligenceService:
         return [entry for entry in entries if entry]
 
     def _parse_rss_item(self, node: ET.Element, source_name: str) -> Optional[FeedEntry]:
-        return self._build_entry(
+        entry = self._build_entry(
             self._text(node, "title"),
             self._text(node, "description") or self._text(node, "summary"),
             self._text(node, "link"),
             source_name,
             self._parse_datetime(self._text(node, "pubDate") or self._text(node, "published")),
         )
+        publisher = node.find("./source")
+        if entry and publisher is not None:
+            entry = replace(entry, raw_payload={**entry.raw_payload,
+                            "publisher": self._clean_text(publisher.text or "")[:120],
+                            "publisher_url": publisher.attrib.get("url", "")[:1000]})
+        return entry
 
     def _parse_atom_entry(self, node: ET.Element, source_name: str) -> Optional[FeedEntry]:
         url = ""

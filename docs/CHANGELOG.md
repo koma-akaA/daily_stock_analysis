@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 个人日报增加免Key公开RSS消息监控，复用现有安全抓取模块；过滤日期、标的身份、来源和重复内容，区分报道线索与AI推断，保留已有新闻API与舆情渠道。
 - [修复] 两个个人部署工作流补齐Adanos Key/URL映射，兼容已确认存放Adanos Key的REDDIT_SECRET；按股票查询Reddit/X，缓存空结果并在鉴权或额度失败后停止重复调用。
 - [改进] 原版手动工作流增加CRCL/HOOD接口与额度检查模式，输出脱敏结果，不调用AI或推送；Tavily固定basic搜索并隐藏错误中的密钥。
 - [修复] 个人报告由程序生成均线等技术关系的可引用证据，阻止AI自由改写时颠倒关系；区分股票财报与加密网络数据缺项。
