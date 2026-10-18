@@ -1,1 +1,1 @@
-{"status": "claimed", "date_beijing": "2026-10-18", "run_id": "39122692244", "body_sha256": "1bf46ac6a7406d0be175bcc56bbe8cc48b733b919c66a99d444ccaf7a12b9d65", "report": "reports/2026-10-18/39122692244.md"}
+{"status": "accepted", "date_beijing": "2026-10-18", "run_id": "39122692244", "body_sha256": "1bf46ac6a7406d0be175bcc56bbe8cc48b733b919c66a99d444ccaf7a12b9d65", "report": "reports/2026-10-18/39122692244.md", "response_code": 200}
