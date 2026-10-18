@@ -1,0 +1,93 @@
+name: 每日投资分析（个人微信）
+
+on:
+  schedule:
+    - cron: '30 0 * * 2-6'  # Beijing Tue-Sat 08:30; always after US close in either DST regime
+    - cron: '15 2 * * 2-6'  # Beijing 10:15 catch-up; durable claim prevents duplicate notifications
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 运行分析或发送微信测试消息
+        type: choice
+        default: analysis
+        options: [analysis, push-test]
+      no_notify:
+        description: 仅生成和归档报告，不推送
+        type: boolean
+        default: false
+      resend:
+        description: 明确允许当天再推送一次（默认跳过已认领日期）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write  # Report archive + durable notification claim on investment-history only
+
+concurrency:
+  group: personal-investment
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      TZ: Asia/Shanghai
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-actions.lock
+      - name: 安装已锁定依赖
+        run: python -m pip install -r requirements-actions.lock
+      - name: 验证关键路径
+        run: python -m pytest -q tests/test_personal_investment.py tests/test_pushplus_safety.py tests/test_investment_history.py
+      - name: 分析、归档与推送
+        env:
+          # Keys only enter this step. No forks/PRs trigger this workflow.
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL }}
+          LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
+          SOCIAL_SENTIMENT_API_KEY: ${{ secrets.SOCIAL_SENTIMENT_API_KEY }}
+          INVESTMENT_ASSETS: ${{ vars.INVESTMENT_ASSETS || 'CRCL,HOOD,COIN,TSLA,BTC,ETH' }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode || 'analysis' }}
+          INPUT_NO_NOTIFY: ${{ inputs.no_notify }}
+          INPUT_RESEND: ${{ inputs.resend }}
+          REPORT_LANGUAGE: zh
+          AGENT_MODE: 'false'
+          GENERATION_BACKEND: litellm
+        run: |
+          args=(--mode "$INPUT_MODE")
+          if [ "$EVENT_NAME" = schedule ]; then args+=(--scheduled); fi
+          if [ "$INPUT_NO_NOTIFY" = true ]; then args+=(--no-notify); fi
+          if [ "$INPUT_RESEND" = true ]; then args+=(--resend); fi
+          python scripts/personal_investment.py "${args[@]}"
+      - name: 保存完整证据与手机预览
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: investment-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/personal/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: 报告入口
+        if: always()
+        run: |
+          echo '完整报告：[历史记录](https://github.com/${{ github.repository }}/tree/investment-history)。本次原始证据和手机预览见 artifacts。' >> "$GITHUB_STEP_SUMMARY"
+          echo 'PushPlus accepted 仅表示已受理；最终送达与微信显示需在接收端核对。' >> "$GITHUB_STEP_SUMMARY"

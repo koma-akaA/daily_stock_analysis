@@ -30,6 +30,9 @@ class PushplusSender:
         self._pushplus_token = getattr(config, 'pushplus_token', None)
         self._pushplus_topic = getattr(config, 'pushplus_topic', None)
         self._pushplus_max_bytes = getattr(config, 'pushplus_max_bytes', 20000)
+        self.last_delivery_status = "not_sent"
+        self.last_response_code = None
+        self.last_short_codes = []
         
     def send_to_pushplus(
         self,
@@ -66,7 +69,10 @@ class PushplusSender:
             logger.warning("PushPlus Token 未配置，跳过推送")
             return False
 
-        api_url = "http://www.pushplus.plus/send"
+        self.last_delivery_status = "unknown"
+        self.last_response_code = None
+        self.last_short_codes = []
+        api_url = "https://www.pushplus.plus/send"
 
         if title is None:
             date_str = datetime.now().strftime('%Y-%m-%d')
@@ -95,7 +101,8 @@ class PushplusSender:
                 timeout_seconds=timeout_seconds,
             )
         except Exception as e:
-            logger.error(f"发送 PushPlus 消息失败: {e}")
+            # Transport exceptions may include credentials from echoed request bodies.
+            logger.error("PushPlus 请求结果未知(%s)，为避免重复消息不自动重发", type(e).__name__)
             return False
 
     def _send_pushplus_message(
@@ -108,9 +115,10 @@ class PushplusSender:
     ) -> bool:
         payload = {
             "token": self._pushplus_token,
-            "title": title,
+            "title": title[:100],
             "content": content,
             "template": "markdown",
+            "channel": "wechat",
         }
 
         if self._pushplus_topic:
@@ -120,14 +128,20 @@ class PushplusSender:
 
         if response.status_code == 200:
             result = response.json()
+            code = result.get('code')
+            self.last_response_code = code if isinstance(code, int) else None
             if result.get('code') == 200:
-                logger.info("PushPlus 消息发送成功")
+                self.last_delivery_status = "accepted"
+                if isinstance(result.get("data"), str):
+                    self.last_short_codes.append(result["data"])
+                logger.info("PushPlus 已受理；最终微信送达尚未确认")
                 return True
 
-            error_msg = result.get('msg', '未知错误')
-            logger.error(f"PushPlus 返回错误: {error_msg}")
+            self.last_delivery_status = "rejected"
+            logger.error("PushPlus 拒绝请求，code=%s；请在官方最新请求记录中排查", self.last_response_code)
             return False
 
+        self.last_delivery_status = "unknown" if response.status_code >= 500 else "rejected"
         logger.error(f"PushPlus 请求失败: HTTP {response.status_code}")
         return False
 
@@ -147,8 +161,9 @@ class PushplusSender:
                 logger.info(f"PushPlus 第 {i+1}/{total_chunks} 批发送成功")
             else:
                 logger.error(f"PushPlus 第 {i+1}/{total_chunks} 批发送失败")
+                return False
 
             if i < total_chunks - 1:
-                time.sleep(1)
+                time.sleep(13)  # Free authenticated accounts: at most five requests/minute.
 
         return success_count == total_chunks

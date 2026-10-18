@@ -1,0 +1,94 @@
+"""Synthetic fixtures exercise truthfulness, session timing and asset identity."""
+from datetime import datetime, timezone, date
+from types import SimpleNamespace
+
+import pandas as pd
+import pytest
+
+from data_provider.crypto_fetcher import CryptoFetcher
+from src.services.personal_investment_report import (
+    PersonalInvestmentReport, technical_facts, us_session_context, validate_bars, yahoo_news,
+)
+
+
+def bars(count=90, crypto=True):
+    dates = pd.date_range('2026-01-01', periods=count, freq='D')
+    return pd.DataFrame({'date': dates, 'open': range(100, 100 + count),
+                         'high': range(102, 102 + count), 'low': range(99, 99 + count),
+                         'close': range(101, 101 + count), 'volume': [1000] * count})
+
+
+@pytest.mark.parametrize('stamp,session,close', [
+    ('2026-07-08T00:30:00+00:00', '2026-07-07', '20:00'),  # DST
+    ('2026-12-09T00:30:00+00:00', '2026-12-08', '21:00'),  # standard time
+    ('2026-12-26T00:30:00+00:00', '2026-12-24', '18:00'),  # holiday + early close
+    ('2026-10-18T00:30:00+00:00', '2026-10-16', '20:00'),  # weekend
+])
+def test_last_completed_us_session(stamp, session, close):
+    result = us_session_context(datetime.fromisoformat(stamp))
+    assert result['session'] == session
+    assert close in result['close_utc']
+
+
+def test_no_open_session_used():
+    result = us_session_context(datetime.fromisoformat('2026-10-16T19:59:00+00:00'))
+    assert result['session'] == '2026-10-15'
+
+
+def test_stale_missing_and_nonfinite_bars_rejected():
+    df = bars()
+    expected = df.iloc[-1].date.date()
+    assert len(validate_bars(df, expected, crypto=True)) == 90
+    with pytest.raises(ValueError):
+        validate_bars(df.iloc[:-1], expected, crypto=True)
+    with pytest.raises(ValueError):
+        validate_bars(df.drop(42), expected, crypto=True)
+    df.loc[10, 'close'] = float('nan')
+    with pytest.raises(ValueError):
+        validate_bars(df, expected, crypto=True)
+
+
+def test_ma60_never_uses_ma20_fallback():
+    assert technical_facts(bars(59), 'BTC') is None
+    facts = technical_facts(bars(90), 'BTC')
+    assert facts['ma60'] == pytest.approx(bars(90).close.tail(60).mean())
+    assert facts['ma60'] != facts['ma20']
+    assert '右侧' in facts['trend']
+    assert '未出现新金叉' in facts['double_ma']
+
+
+def test_crypto_identity_is_explicit():
+    with pytest.raises(KeyError):
+        CryptoFetcher().daily('CRCL')
+
+
+def test_crypto_excludes_incomplete_day():
+    now = datetime(2026, 1, 4, 1, tzinfo=timezone.utc)
+    rows = [[int(datetime(2026, 1, day, tzinfo=timezone.utc).timestamp()), 99, 102, 100, 101, 10]
+            for day in (2, 3, 4)]
+    response = SimpleNamespace(raise_for_status=lambda: None, json=lambda: rows)
+    session = SimpleNamespace(headers={}, mount=lambda *a: None, get=lambda *a, **k: response)
+    df = CryptoFetcher(session).daily('BTC', now)
+    assert df.iloc[-1].date.date() == date(2026, 1, 3)
+    assert len(df) == 2
+
+
+def test_news_requires_date_and_safe_url():
+    ticker = SimpleNamespace(news=[{'content': {'title': 'SYNTHETIC news',
+             'pubDate': '2026-10-16T12:00:00Z', 'canonicalUrl': {'url': 'https://news.invalid/a'}}},
+             {'content': {'title': 'No date', 'canonicalUrl': {'url': 'https://news.invalid/b'}}}])
+    assert len(yahoo_news(ticker, datetime(2026, 10, 18, tzinfo=timezone.utc))) == 1
+
+
+def test_ai_never_called_without_quote():
+    report = object.__new__(PersonalInvestmentReport)
+    assert report.interpret({'quote': None})['status'] == 'unavailable'
+
+
+def test_ai_rejects_unknown_evidence_reference():
+    report = object.__new__(PersonalInvestmentReport)
+    report._analyzer = SimpleNamespace(generate_text_with_metadata=lambda *a, **k:
+                                      SimpleNamespace(text='{"valuation":{"text":"invented","evidence":["fake"]}}',
+                                                      model='SYNTHETIC', provider='SYNTHETIC'))
+    facts = {'quote': {'price': 100}, 'technicals': None, 'fundamentals': None, 'news': [], 'social': None}
+    assert report.interpret(facts)['status'] == 'unavailable'

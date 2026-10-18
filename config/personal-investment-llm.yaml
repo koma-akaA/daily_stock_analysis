@@ -1,0 +1,11 @@
+# Optional deployment preset. API keys are resolved from the environment at runtime.
+# Change model in this configuration when migrating providers; never add literal credentials.
+model_list:
+  - model_name: investment
+    litellm_params:
+      model: deepseek/deepseek-flash
+      "api_key": os.environ/DEEPSEEK_API_KEY
+      timeout: 90
+      extra_body:
+        thinking:
+          type: disabled
