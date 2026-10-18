@@ -92,3 +92,20 @@ def test_ai_rejects_unknown_evidence_reference():
                                                       model='SYNTHETIC', provider='SYNTHETIC'))
     facts = {'quote': {'price': 100}, 'technicals': None, 'fundamentals': None, 'news': [], 'social': None}
     assert report.interpret(facts)['status'] == 'unavailable'
+
+
+def test_crypto_prompt_does_not_assign_crcl_research_focus():
+    report = object.__new__(PersonalInvestmentReport)
+    captured = []
+
+    def generate(prompt, **kwargs):
+        captured.append(prompt)
+        return None
+
+    report._analyzer = SimpleNamespace(generate_text_with_metadata=generate)
+    report.interpret({'symbol': 'BTC', 'name': 'Bitcoin', 'asset_class': 'crypto',
+                      'quote': {'price': 100}, 'technicals': {}, 'fundamentals': None,
+                      'news': [], 'social': None, 'ai': {'text': 'SYNTHETIC_OLD_ANALYSIS'}})
+    assert '唯一分析对象是BTC' in captured[0]
+    assert '本轮CRCL优先研究' not in captured[0]
+    assert 'SYNTHETIC_OLD_ANALYSIS' not in captured[0]
