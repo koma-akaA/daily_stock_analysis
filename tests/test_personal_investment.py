@@ -1,5 +1,6 @@
 """Synthetic fixtures exercise truthfulness, session timing and asset identity."""
 from datetime import datetime, timezone, date
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -7,7 +8,8 @@ import pytest
 
 from data_provider.crypto_fetcher import CryptoFetcher
 from src.services.personal_investment_report import (
-    PersonalInvestmentReport, technical_facts, us_session_context, validate_bars, yahoo_news,
+    AI_FIELDS, PersonalInvestmentReport, technical_facts, technical_readout,
+    us_session_context, validate_bars, yahoo_news,
 )
 
 
@@ -123,3 +125,42 @@ def test_crypto_prompt_does_not_assign_crcl_research_focus():
     assert '唯一分析对象是BTC' in captured[0]
     assert '本轮CRCL优先研究' not in captured[0]
     assert 'SYNTHETIC_OLD_ANALYSIS' not in captured[0]
+
+
+def test_technical_relationships_are_computed_not_rewritten_by_ai():
+    facts = {'symbol': 'SYNTHETIC', 'asset_class': 'US equity', 'quote': {'price': 80},
+             'technicals': {'ma20': 90, 'ma60': 70, 'double_ma': 'MA20高于MA60',
+                            'levels_reference_price': 80},
+             'fundamentals': None, 'news': [], 'social': None}
+    readout = technical_readout(facts)
+    assert readout['price_ma20'] == '最近收盘价低于MA20'
+    assert readout['price_ma60'] == '最近收盘价高于MA60'
+    assert readout['double_ma'] == 'MA20高于MA60'
+    report = object.__new__(PersonalInvestmentReport)
+    claims = {key: {'text': '等待更多证据确认，限制单次风险预算',
+                    'evidence': ['technical:price_ma20']} for key in AI_FIELDS}
+
+    def generate(*args, **kwargs):
+        return SimpleNamespace(text=json.dumps(claims), model='SYNTHETIC', provider='SYNTHETIC')
+
+    report._analyzer = SimpleNamespace(generate_text_with_metadata=generate)
+    assert report.interpret(facts)['status'] == 'generated'
+    # This actually happened in live QA: vague period names inverted a true relationship.
+    claims['long_term']['text'] = '长期均线仍高于中期均线'
+    assert report.interpret(facts)['status'] == 'unavailable'
+    claims['long_term']['text'] = '中期均线上方形成支撑'
+    assert report.interpret(facts)['status'] == 'unavailable'
+    calls = []
+
+    def repair_once(prompt, **kwargs):
+        calls.append(prompt)
+        text = json.dumps(claims) if len(calls) == 1 else json.dumps({'long_term': '长期条件尚待验证'})
+        return SimpleNamespace(text=text, model='SYNTHETIC', provider='SYNTHETIC')
+
+    report._analyzer = SimpleNamespace(generate_text_with_metadata=repair_once)
+    repaired = report.interpret(facts)
+    assert len(calls) == 2
+    assert repaired['status'] == 'generated'
+    assert repaired['repaired_fields'] == ['long_term']
+    assert repaired['long_term']['text'] == '长期条件尚待验证'
+    assert repaired['long_term']['evidence'] == ['technical:price_ma20']
