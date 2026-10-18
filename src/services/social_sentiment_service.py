@@ -12,9 +12,11 @@ Only activates for US stock codes (AAPL, TSLA, etc.).
 """
 
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import requests
 from tenacity import (
@@ -22,7 +24,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
-    before_sleep_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,13 +44,12 @@ _REQUEST_RETRY_WAIT_CAP = 5  # wait_exponential(..., max=5)
     stop=stop_after_attempt(2),
     wait=wait_exponential(multiplier=1, min=1, max=5),
     retry=retry_if_exception_type(_TRANSIENT_EXCEPTIONS),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
 def _get_with_retry(url: str, *, headers: Dict[str, str], params: Optional[Dict[str, Any]] = None,
                     timeout: int = _REQUEST_TIMEOUT) -> requests.Response:
     """GET with retry on transient network errors."""
-    return requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+    return requests.get(url, headers=headers, params=params or {}, timeout=timeout, allow_redirects=False)
 
 
 class SocialSentimentService:
@@ -61,7 +61,7 @@ class SocialSentimentService:
 
     Usage::
 
-        svc = SocialSentimentService(api_key="sk_live_...", api_url="https://api.adanos.org")
+        svc = SocialSentimentService(api_key="SYNTHETIC_ADANOS", api_url="https://api.adanos.org")
         if svc.is_available:
             context = svc.get_social_context("TSLA")
     """
@@ -69,13 +69,21 @@ class SocialSentimentService:
     # Cache TTL for trending endpoints (seconds)
     _TRENDING_CACHE_TTL = 600  # 10 minutes
 
-    def __init__(self, api_key: Optional[str] = None, api_url: str = "https://api.adanos.org"):
+    def __init__(self, api_key: str | None = None, api_url: str = "https://api.adanos.org"):
         self._api_key = (api_key or "").strip() or None
-        self._api_url = (api_url or "https://api.adanos.org").rstrip("/")
+        self._api_url = (api_url or "https://api.adanos.org").strip().rstrip("/")
+        parsed = urlsplit(self._api_url)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path or parsed.query or parsed.fragment):
+            raise ValueError("SOCIAL_SENTIMENT_API_URL must be an HTTPS API origin without path or credentials")
         # Simple in-memory cache: {"key": (timestamp, data)}
         self._cache: Dict[str, tuple] = {}
         self._cache_lock = threading.RLock()
         self._cache_inflight: Dict[str, threading.Event] = {}
+        # Whitelisted diagnostics only: never response bodies, request headers or keys.
+        self.request_info: Dict[str, Dict[str, Any]] = {}
+        self.request_count = 0
+        self._blocked = False
 
     @property
     def is_available(self) -> bool:
@@ -91,15 +99,31 @@ class SocialSentimentService:
 
     def _fetch_json(self, url: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict]:
         """Fetch JSON from API, return None on any error."""
+        path = urlsplit(url).path
+        if self._blocked:
+            self.request_info[path] = {"status": "skipped_auth_or_quota", "http_status": None}
+            return None
         try:
+            self.request_count += 1
             resp = _get_with_retry(url, headers=self._headers, params=params)
+            info = {"http_status": resp.status_code, "status": "ok" if resp.status_code == 200 else "http_error"}
+            quota = {}
+            for header in ("X-RateLimit-Limit-Monthly", "X-RateLimit-Remaining-Monthly",
+                           "X-RateLimit-Used-Monthly", "X-RateLimit-Limit-Burst", "X-RateLimit-Remaining-Burst"):
+                value = resp.headers.get(header)
+                if isinstance(value, str) and value.isdigit():
+                    quota[header] = int(value)
+            info["quota"] = quota
+            self.request_info[path] = info
+            if resp.status_code in (401, 429) or quota.get("X-RateLimit-Remaining-Monthly") == 0:
+                self._blocked = True  # No repeated calls after exhausted quota / invalid credentials.
             if resp.status_code == 200:
                 return resp.json()
-            logger.warning("Social sentiment API %s returned %s", url, resp.status_code)
-        except _TRANSIENT_EXCEPTIONS as e:
-            logger.warning("Social sentiment API %s network error: %s", url, e)
-        except Exception as e:
-            logger.warning("Social sentiment API %s unexpected error: %s", url, e)
+            logger.warning("Social sentiment API returned HTTP %s", resp.status_code)
+        except Exception as exc:
+            self.request_info[path] = {"status": "network_or_parse_error", "http_status": None,
+                                       "error_type": type(exc).__name__}
+            logger.warning("Social sentiment API failure: %s", type(exc).__name__)
         return None
 
     @classmethod
@@ -108,7 +132,7 @@ class SocialSentimentService:
         return max(1.0, min(float(cls._TRENDING_CACHE_TTL), float(request_budget), 30.0))
 
     def _fetch_cached(self, cache_key: str, url: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
-        """Fetch with simple TTL cache (for trending endpoints)."""
+        """Cache successes and failures, coalescing concurrent identical requests."""
         now = time.monotonic()
         with self._cache_lock:
             cached = self._cache.get(cache_key)
@@ -130,17 +154,12 @@ class SocialSentimentService:
                 if cached and (now - cached[0]) < self._TRENDING_CACHE_TTL:
                     return cached[1]
 
-            data = self._fetch_json(url, params)
-            if data is not None:
-                with self._cache_lock:
-                    self._cache[cache_key] = (time.monotonic(), data)
-            return data
+            return None  # Do not issue a duplicate billable request while its owner is still running.
 
         try:
             data = self._fetch_json(url, params)
-            if data is not None:
-                with self._cache_lock:
-                    self._cache[cache_key] = (time.monotonic(), data)
+            with self._cache_lock:
+                self._cache[cache_key] = (time.monotonic(), data)
             return data
         finally:
             with self._cache_lock:
@@ -151,8 +170,28 @@ class SocialSentimentService:
 
     def fetch_reddit_report(self, ticker: str) -> Optional[Dict]:
         """Fetch detailed Reddit report for a single ticker."""
-        url = f"{self._api_url}/reddit/stocks/v1/report/{ticker.upper()}"
-        return self._fetch_json(url)
+        return self._fetch_stock_report("reddit", ticker)
+
+    def fetch_x_report(self, ticker: str) -> Optional[Dict]:
+        """Fetch X for the requested stock even when it is absent from trending."""
+        return self._fetch_stock_report("x", ticker)
+
+    def _fetch_stock_report(self, platform: str, ticker: str) -> Optional[Dict]:
+        symbol = ticker.strip().upper()
+        if not re.fullmatch(r"[A-Z]{1,10}(?:[.-][A-Z])?", symbol):
+            raise ValueError("Expected a stock ticker")
+        url = f"{self._api_url}/{platform}/stocks/v1/stock/{symbol}"
+        data = self._fetch_cached(f"{platform}:{symbol}", url)
+        if not isinstance(data, dict):
+            return None
+        report = data.get("report", data)
+        if not isinstance(report, dict) or report.get("found") is False:
+            return None  # HTTP 200 + found:false is missing coverage, not neutral sentiment.
+        if report.get("ticker") and str(report["ticker"]).upper() != symbol:
+            return None
+        if not any(report.get(key) is not None for key in ("buzz_score", "buzz", "sentiment_score", "sentiment", "mentions", "total_mentions")):
+            return None
+        return data
 
     def fetch_reddit_trending(self) -> Optional[List[Dict]]:
         """Fetch Reddit trending stocks (cached)."""
@@ -188,7 +227,7 @@ class SocialSentimentService:
     # Main entry point
     # ------------------------------------------------------------------
 
-    def get_social_context(self, ticker: str) -> Optional[str]:
+    def get_social_context(self, ticker: str, *, include_polymarket: bool = True) -> Optional[str]:
         """
         Fetch social sentiment from all platforms and return a formatted
         text block for the LLM prompt.  Returns None if no data found.
@@ -201,15 +240,12 @@ class SocialSentimentService:
         # 1. Reddit per-ticker report (richest data)
         reddit_data = self.fetch_reddit_report(ticker_upper)
 
-        # 2. X trending (filter for this ticker)
-        x_entry = None
-        x_trending = self.fetch_x_trending()
-        if x_trending:
-            x_entry = self._find_ticker_in_trending(x_trending, ticker_upper)
+        # 2. Per-stock X endpoint; absence from a leaderboard is not missing coverage.
+        x_entry = self.fetch_x_report(ticker_upper)
 
         # 3. Polymarket trending (filter for this ticker)
         poly_entry = None
-        poly_trending = self.fetch_polymarket_trending()
+        poly_trending = self.fetch_polymarket_trending() if include_polymarket else None
         if poly_trending:
             poly_entry = self._find_ticker_in_trending(poly_trending, ticker_upper)
 
@@ -248,7 +284,13 @@ class SocialSentimentService:
         poly_entry: Optional[Dict],
     ) -> str:
         """Format social sentiment data as a prompt-ready text block."""
-        lines = [f"📱 Social Sentiment Intelligence for {ticker} (Reddit / X / Polymarket)"]
+        summaries = []
+        for label, data in (("Reddit", reddit_data), ("X", x_entry)):
+            report = data.get("report", data) if data else {}
+            mentions = SocialSentimentService._coalesce(report.get("total_mentions"), report.get("mentions"))
+            score = SocialSentimentService._coalesce(report.get("sentiment_score"), report.get("sentiment"))
+            summaries.append(f"{label}：提及{mentions if mentions is not None else '不可用'}，情绪{score if score is not None else '不可用'}")
+        lines = ["；".join(summaries), f"📱 Social Sentiment Intelligence for {ticker} (Reddit / X / Polymarket)"]
         lines.append("=" * 60)
 
         # --- Reddit ---
@@ -273,14 +315,14 @@ class SocialSentimentService:
             if mentions is not None:
                 subs = SocialSentimentService._coalesce(report.get("subreddit_count"), report.get("subreddits"))
                 sub_str = f" across {subs} subreddits" if subs else ""
-                lines.append(f"  Mentions: {mentions}{sub_str} (7-day)")
+                lines.append(f"  Mentions: {mentions}{sub_str} (selected UTC window)")
 
             # Top mentions
             top_mentions = report.get("top_mentions", [])
             if top_mentions:
                 lines.append("  Top Mentions:")
                 for i, m in enumerate(top_mentions[:5], 1):
-                    text = (m.get("text") or m.get("title") or "")[:120]
+                    text = (m.get("text_snippet") or m.get("text") or m.get("title") or "")[:120]
                     sub = m.get("subreddit", "")
                     score = SocialSentimentService._coalesce(m.get("sentiment_score"), m.get("sentiment"))
                     upvotes = m.get("upvotes", "")
@@ -295,13 +337,13 @@ class SocialSentimentService:
                     lines.append(f"    {i}. \"{text}\"{meta}")
 
             # Daily stats
-            daily = report.get("daily_stats", [])
+            daily = report.get("daily_trend") or report.get("daily_stats", [])
             if daily:
                 lines.append("  Recent Daily Activity:")
                 for d in daily[:5]:
                     day = d.get("date", "")
                     day_mentions = d.get("mentions", "?")
-                    day_sentiment = d.get("avg_sentiment", "?")
+                    day_sentiment = SocialSentimentService._coalesce(d.get("sentiment_score"), d.get("avg_sentiment"), "?")
                     lines.append(f"    {day}: {day_mentions} mentions, avg sentiment {day_sentiment}")
         else:
             lines.append("\n🔴 Reddit: No data available")
@@ -319,7 +361,7 @@ class SocialSentimentService:
             if x_sentiment is not None:
                 lines.append(f"  Sentiment Score: {x_sentiment}")
             if x_mentions is not None:
-                lines.append(f"  Mentions: {x_mentions} (7-day)")
+                lines.append(f"  Mentions: {x_mentions} (selected UTC window)")
         else:
             lines.append("\n🐦 X (Twitter): No data available")
 
@@ -336,8 +378,8 @@ class SocialSentimentService:
             if poly_trades is not None:
                 lines.append(f"  Trade Count: {poly_trades}")
         else:
-            lines.append("\n🔮 Polymarket: No active prediction markets found")
+            lines.append("\n🔮 Polymarket: Data unavailable / not requested")
 
         lines.append("")
-        lines.append("Source: api.adanos.org — Real-time social sentiment aggregation")
+        lines.append("Source: Adanos aggregation; coverage and sample bias apply, not the entire community")
         return "\n".join(lines)

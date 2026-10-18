@@ -25,6 +25,8 @@
 
 所有 Key 都放 Repository secrets，不放 Variables、不写 `.env.example` 实值、不写日志。模型名、资产列表和配置文件路径可以放 Variables。GitHub内置 `GITHUB_TOKEN` 由Actions注入，不需要另建长期PAT用于日常分析。
 
+Adanos Key/URL的工作流映射、已确认的 `REDDIT_SECRET` 兼容名，以及CRCL/HOOD低请求量接口测试见 [研究接口检查](RESEARCH_API_CHECK.md)。
+
 ## 报告真实性与口径
 
 - 美股日线复用YfinanceFetcher，技术指标复用StockTrendAnalyzer；免费Yahoo数据可能延迟、限流或缺字段，不承诺交易所级实时行情。美股“当前价格”明确标注为最近已收盘日线，不冒充实时盘中价。

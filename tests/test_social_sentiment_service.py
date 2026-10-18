@@ -21,7 +21,7 @@ class TestServiceAvailability(unittest.TestCase):
         self.assertFalse(svc.is_available)
 
     def test_available_with_key(self):
-        svc = SocialSentimentService(api_key="sk_live_test123")
+        svc = SocialSentimentService(api_key="SYNTHETIC_ADANOS_123")
         self.assertTrue(svc.is_available)
 
 
@@ -29,7 +29,7 @@ class TestFetchRedditReport(unittest.TestCase):
     """Tests for fetch_reddit_report."""
 
     def setUp(self):
-        self.svc = SocialSentimentService(api_key="sk_live_test", api_url="https://api.example.com")
+        self.svc = SocialSentimentService(api_key="SYNTHETIC_ADANOS", api_url="https://api.example.com")
 
     @patch("src.services.social_sentiment_service._get_with_retry")
     def test_success(self, mock_get):
@@ -51,7 +51,7 @@ class TestFetchRedditReport(unittest.TestCase):
         self.assertEqual(result["report"]["buzz_score"], 85.5)
         mock_get.assert_called_once()
         call_args = mock_get.call_args
-        self.assertIn("/reddit/stocks/v1/report/TSLA", call_args[0][0])
+        self.assertIn("/reddit/stocks/v1/stock/TSLA", call_args[0][0])
 
     @patch("src.services.social_sentiment_service._get_with_retry")
     def test_http_error_returns_none(self, mock_get):
@@ -75,7 +75,7 @@ class TestFetchTrending(unittest.TestCase):
     """Tests for trending endpoints with caching."""
 
     def setUp(self):
-        self.svc = SocialSentimentService(api_key="sk_live_test", api_url="https://api.example.com")
+        self.svc = SocialSentimentService(api_key="SYNTHETIC_ADANOS", api_url="https://api.example.com")
 
     @patch("src.services.social_sentiment_service._get_with_retry")
     def test_x_trending_returns_list(self, mock_get):
@@ -141,23 +141,14 @@ class TestFetchTrending(unittest.TestCase):
         for result in results:
             self.assertEqual(result, [{"ticker": "AAPL"}])
 
-    def test_waiter_fallback_uses_capped_wait_and_populates_cache(self):
+    def test_waiter_timeout_does_not_make_duplicate_billable_request(self):
         inflight = MagicMock()
         inflight.wait.return_value = False
         self.svc._cache_inflight["x_trending"] = inflight
-        payload = {"trending": [{"ticker": "AAPL"}]}
-
-        with patch.object(self.svc, "_fetch_json", return_value=payload) as mock_fetch:
-            first = self.svc.fetch_x_trending()
-            second = self.svc.fetch_x_trending()
-
-        self.assertEqual(first, [{"ticker": "AAPL"}])
-        self.assertEqual(second, [{"ticker": "AAPL"}])
+        with patch.object(self.svc, "_fetch_json") as mock_fetch:
+            assert self.svc.fetch_x_trending() is None
+        mock_fetch.assert_not_called()
         inflight.wait.assert_called_once_with(timeout=self.svc._cache_wait_timeout_seconds())
-        self.assertLess(self.svc._cache_wait_timeout_seconds(), self.svc._TRENDING_CACHE_TTL)
-        self.assertLessEqual(self.svc._cache_wait_timeout_seconds(), 30.0)
-        self.assertEqual(mock_fetch.call_count, 1)
-        self.assertEqual(self.svc._cache["x_trending"][1], payload)
 
 
 class TestGetSocialContext(unittest.TestCase):
@@ -174,7 +165,7 @@ class TestGetSocialContext(unittest.TestCase):
         mock_resp.status_code = 404
         mock_get.return_value = mock_resp
 
-        svc = SocialSentimentService(api_key="sk_live_test")
+        svc = SocialSentimentService(api_key="SYNTHETIC_ADANOS")
         result = svc.get_social_context("XYZZY")
         self.assertIsNone(result)
 
@@ -182,7 +173,7 @@ class TestGetSocialContext(unittest.TestCase):
     def test_formats_reddit_data(self, mock_get):
         def side_effect(url, **kwargs):
             resp = MagicMock()
-            if "/report/" in url:
+            if "/reddit/stocks/v1/stock/" in url:
                 resp.status_code = 200
                 resp.json.return_value = {
                     "report": {
@@ -203,7 +194,7 @@ class TestGetSocialContext(unittest.TestCase):
 
         mock_get.side_effect = side_effect
 
-        svc = SocialSentimentService(api_key="sk_live_test")
+        svc = SocialSentimentService(api_key="SYNTHETIC_ADANOS")
         result = svc.get_social_context("TSLA")
 
         self.assertIsNotNone(result)
@@ -218,10 +209,10 @@ class TestGetSocialContext(unittest.TestCase):
         def side_effect(url, **kwargs):
             resp = MagicMock()
             resp.status_code = 200
-            if "/report/" in url:
+            if "/reddit/stocks/v1/stock/" in url:
                 resp.json.return_value = {"report": {"buzz_score": 80, "trend": "rising"}}
             elif "/x/" in url:
-                resp.json.return_value = {"trending": [{"ticker": "AAPL", "buzz_score": 65}]}
+                resp.json.return_value = {"ticker": "AAPL", "buzz_score": 65}
             elif "/polymarket/" in url:
                 resp.json.return_value = {"trending": [{"ticker": "AAPL", "buzz_score": 45, "trade_count": 120}]}
             else:
@@ -230,7 +221,7 @@ class TestGetSocialContext(unittest.TestCase):
 
         mock_get.side_effect = side_effect
 
-        svc = SocialSentimentService(api_key="sk_live_test")
+        svc = SocialSentimentService(api_key="SYNTHETIC_ADANOS")
         result = svc.get_social_context("AAPL")
 
         self.assertIsNotNone(result)

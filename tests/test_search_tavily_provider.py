@@ -77,9 +77,27 @@ class TestTavilySearchProvider(unittest.TestCase):
         self.assertEqual(_FakeTavilyClient.search_calls[0]["days"], 3)
         self.assertEqual(_FakeTavilyClient.search_calls[0]["max_results"], 5)
         self.assertEqual(_FakeTavilyClient.search_calls[0]["search_depth"], "basic")
+        self.assertFalse(_FakeTavilyClient.search_calls[0]["auto_parameters"])
+        self.assertTrue(_FakeTavilyClient.search_calls[0]["include_usage"])
         self.assertEqual(len(resp.results), 1)
         self.assertEqual(resp.results[0].published_date, published_text)
         self.assertEqual(resp.results[0].url, "https://example.com/alibaba-earnings")
+
+    def test_invalid_credentials_are_not_logged_or_retried(self):
+        class InvalidAPIKeyError(Exception):
+            pass
+
+        key = 'SYNTHETIC_TAVILY_PRIVATE'
+        provider = TavilySearchProvider([key])
+        with self._patch_tavily({}), patch.object(_FakeTavilyClient, 'search', side_effect=InvalidAPIKeyError(key)) as search:
+            with self.assertLogs('src.search_service', level='WARNING') as logs:
+                first = provider.search('CRCL news', topic='news')
+                second = provider.search('HOOD news', topic='news')
+        self.assertFalse(first.success)
+        self.assertFalse(second.success)
+        self.assertEqual(search.call_count, 1)
+        self.assertNotIn(key, first.error_message)
+        self.assertNotIn(key, str(logs.output))
 
     def test_provider_supports_publishedDate_variant(self) -> None:
         provider = TavilySearchProvider(["dummy_key"])

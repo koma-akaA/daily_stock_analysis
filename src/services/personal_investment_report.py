@@ -294,8 +294,9 @@ class PersonalInvestmentReport:
             try:
                 from src.services.social_sentiment_service import SocialSentimentService
                 if self._social is None:
-                    self._social = SocialSentimentService(self.config.social_sentiment_api_key)
-                item["social"] = self._social.get_social_context(symbol)
+                    self._social = SocialSentimentService(self.config.social_sentiment_api_key,
+                                                          api_url=self.config.social_sentiment_api_url)
+                item["social"] = self._social.get_social_context(symbol, include_polymarket=False)
             except Exception as exc:
                 item["errors"].append("Reddit/X不可用：" + type(exc).__name__)
         return item

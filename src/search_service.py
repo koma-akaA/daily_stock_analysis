@@ -349,7 +349,7 @@ class BaseSearchProvider(ABC):
         with self._state_lock:
             self._key_errors[key] = self._key_errors.get(key, 0) + 1
             error_count = self._key_errors[key]
-        logger.warning(f"[{self._name}] API Key {key[:8]}... 错误计数: {error_count}")
+        logger.warning("[%s] API credential failure count: %s", self._name, error_count)
     
     @abstractmethod
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -362,7 +362,7 @@ class BaseSearchProvider(ABC):
         *,
         max_results: int = 5,
         days: int = 7,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         **search_kwargs: Any,
     ) -> SearchResponse:
         """Run the shared search flow with an optional preselected API key."""
@@ -432,6 +432,22 @@ class TavilySearchProvider(BaseSearchProvider):
     
     def __init__(self, api_keys: List[str]):
         super().__init__(api_keys, "Tavily")
+        self.last_usage: Dict[str, int] = {}
+        self.last_http_status: Optional[int] = None
+        self.request_count = 0
+        self._blocked_keys = set()
+
+    @property
+    def is_available(self) -> bool:
+        return any(key not in self._blocked_keys for key in self._api_keys)
+
+    def _get_next_key(self) -> Optional[str]:
+        with self._state_lock:
+            for _ in self._api_keys:
+                key = super()._get_next_key()
+                if key is not None and key not in self._blocked_keys:
+                    return key
+        return None
     
     def _do_search(
         self,
@@ -442,6 +458,8 @@ class TavilySearchProvider(BaseSearchProvider):
         topic: Optional[str] = None,
     ) -> SearchResponse:
         """执行 Tavily 搜索"""
+        self.last_usage = {}
+        self.last_http_status = None
         try:
             from tavily import TavilyClient
         except ImportError:
@@ -463,18 +481,25 @@ class TavilySearchProvider(BaseSearchProvider):
                 "max_results": max_results,
                 "include_answer": False,
                 "include_raw_content": False,
+                "include_usage": True,
+                "auto_parameters": False,  # Never silently upgrade to the more expensive advanced search.
+                "timeout": 20,
                 "days": days,  # 搜索最近天数的内容
             }
             if topic is not None:
                 search_kwargs["topic"] = topic
 
+            self.request_count += 1
             response = client.search(
                 **search_kwargs,
             )
             
             # 记录原始响应到日志
             logger.info(f"[Tavily] 搜索完成，query='{query}', 返回 {len(response.get('results', []))} 条结果")
-            logger.debug(f"[Tavily] 原始响应: {response}")
+            self.last_http_status = 200
+            usage = response.get("usage") or {}
+            if isinstance(usage.get("credits"), (int, float)):
+                self.last_usage = {"credits": usage["credits"]}
             
             # 解析结果
             results = []
@@ -495,10 +520,17 @@ class TavilySearchProvider(BaseSearchProvider):
             )
             
         except Exception as e:
-            error_msg = str(e)
-            # 检查是否是配额问题
-            if 'rate limit' in error_msg.lower() or 'quota' in error_msg.lower():
-                error_msg = f"API 配额已用尽: {error_msg}"
+            # SDK exceptions may include credentials or response payloads. Emit types only.
+            kind = type(e).__name__
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            self.last_http_status = status if isinstance(status, int) else None
+            if kind in {"InvalidAPIKeyError", "MissingAPIKeyError"}:
+                self.last_http_status = 401
+            if kind == "UsageLimitExceededError":
+                self.last_http_status = self.last_http_status or 432
+            if self.last_http_status in {401, 429, 432, 433}:
+                self._blocked_keys.add(api_key)
+            error_msg = f"Tavily request failed ({kind})"
             
             return SearchResponse(
                 query=query,
@@ -519,8 +551,8 @@ class TavilySearchProvider(BaseSearchProvider):
         if topic is None:
             return super().search(query, max_results=max_results, days=days)
 
-        api_key = self._get_next_key()
-        if not api_key:
+        key = self._get_next_key()
+        if not key:
             return SearchResponse(
                 query=query,
                 results=[],
@@ -531,20 +563,20 @@ class TavilySearchProvider(BaseSearchProvider):
 
         start_time = time.time()
         try:
-            response = self._do_search(query, api_key, max_results, days=days, topic=topic)
+            response = self._do_search(query, key, max_results, days=days, topic=topic)
             response.search_time = time.time() - start_time
 
             if response.success:
                 response.mark_retrieved()
-                self._record_success(api_key)
+                self._record_success(key)
                 logger.info(f"[{self._name}] 搜索 '{query}' 成功，返回 {len(response.results)} 条结果，耗时 {response.search_time:.2f}s")
             else:
-                self._record_error(api_key)
+                self._record_error(key)
 
             return response
 
         except Exception as e:
-            self._record_error(api_key)
+            self._record_error(key)
             elapsed = time.time() - start_time
             logger.error(f"[{self._name}] 搜索 '{query}' 失败: {e}")
             return SearchResponse(
@@ -4296,13 +4328,15 @@ class SearchService:
                 return best_ranked_response
 
             if had_provider_success:
-                return SearchResponse(
+                empty_response = SearchResponse(
                     query=query,
                     results=[],
                     provider="Filtered",
                     success=True,
                     error_message=None,
                 )
+                self._put_cache(cache_key, empty_response)
+                return empty_response
             
             # 所有引擎都失败
             return SearchResponse(
