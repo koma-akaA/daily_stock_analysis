@@ -96,14 +96,17 @@ def main():
              "body_sha256": hashlib.sha256(body.encode()).hexdigest(), "report": history_path}
     if history:
         files[state_path] = json.dumps(state, ensure_ascii=False)
+        print("Persisting report and durable notification claim", flush=True)
         history.save(files, f"Claim investment notification {key}")  # Failure here prevents POST.
     sender = PushplusSender(config)
+    print("Submitting summary to PushPlus personal WeChat channel", flush=True)
     accepted = sender.send_to_pushplus(body, title=f"每日投资分析 {date}" if args.mode == "analysis" else "微信推送测试", timeout_seconds=20)
     state["status"] = sender.last_delivery_status
     state["response_code"] = sender.last_response_code
     # Short codes grant access to report content. Keep them out of a possibly public history branch.
     (folder / "notification.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     if history:
+        print("Recording PushPlus acceptance state in report history", flush=True)
         history.save({state_path: json.dumps(state, ensure_ascii=False)}, f"Record notification result {key}")
     print(f"PushPlus status={state['status']}; accepted={accepted}; final WeChat delivery requires receiver confirmation")
     return 0 if accepted and complete else 1

@@ -29,6 +29,7 @@ class InvestmentHistory:
         if missing and result.status_code == 404:
             return None
         if not result.ok:
+            print(f"GitHub history operation {method} failed: HTTP {result.status_code}", flush=True)
             raise RuntimeError(f"GitHub history HTTP {result.status_code}")
         return result.json()
 

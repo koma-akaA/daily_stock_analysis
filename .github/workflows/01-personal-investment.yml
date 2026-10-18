@@ -33,7 +33,6 @@ jobs:
     timeout-minutes: 35
     env:
       TZ: Asia/Shanghai
-      GITHUB_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -51,6 +50,7 @@ jobs:
       - name: 分析、归档与推送
         env:
           # Keys only enter this step. No forks/PRs trigger this workflow.
+          GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
