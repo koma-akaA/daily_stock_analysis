@@ -30,8 +30,10 @@ NAMES = {"CRCL": "Circle Internet Group", "HOOD": "Robinhood Markets",
 AI_FIELDS = ("valuation", "long_term", "fundamental_change", "risk", "catalyst", "watch", "swing", "conclusion")
 AI_LABELS = ("估值判断", "长期投资逻辑", "基本面变化", "主要风险", "潜在催化", "持续观察条件", "波段观察", "AI 分析结论")
 # Technical facts must be selected by evidence ID, never rewritten in model prose.
+# “基本面支撑估值” is a qualitative valuation phrase, not a support-price claim.
+# Preserve rejection of 支撑位/线/区/带/点, even after 基本面, and all other technical terms.
 TECHNICAL_PROSE = re.compile(
-    r"均线|MA\d|MACD|RSI|DIF|DEA|金叉|死叉|放量|缩量|支撑|阻力|压力位|"
+    r"均线|MA\d|MACD|RSI|DIF|DEA|金叉|死叉|放量|缩量|(?<!基本面)支撑|支撑(?:位|线|区|带|点)|阻力|压力位|"
     r"现价|价格|价位|成交量|量能|动能|量价|多头|空头|高于|低于|上方|下方", re.I)
 logger = logging.getLogger(__name__)
 

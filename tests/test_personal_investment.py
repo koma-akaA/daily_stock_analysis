@@ -8,7 +8,7 @@ import pytest
 
 from data_provider.crypto_fetcher import CryptoFetcher
 from src.services.personal_investment_report import (
-    AI_FIELDS, PersonalInvestmentReport, technical_facts, technical_readout,
+    AI_FIELDS, TECHNICAL_PROSE, PersonalInvestmentReport, technical_facts, technical_readout,
     us_session_context, validate_bars, yahoo_news,
 )
 
@@ -99,6 +99,31 @@ def test_news_requires_date_and_safe_url():
 def test_ai_never_called_without_quote():
     report = object.__new__(PersonalInvestmentReport)
     assert report.interpret({'quote': None})['status'] == 'unavailable'
+
+
+def test_valuation_support_phrase_does_not_bypass_technical_fact_guard():
+    # Live CRCL prose was rejected even after repair because this financial phrase
+    # contains 支撑. Allow only the specific nontechnical phrase, never support levels.
+    assert not TECHNICAL_PROSE.search('缺少经营数据，无法判断估值是否被基本面支撑')
+    for text in ('支撑位尚待确认', '基本面支撑位在八十美元', '基本面支撑区',
+                 '基本面支撑价格', '基本面支撑但长期均线高于中期均线'):
+        assert TECHNICAL_PROSE.search(text)
+    facts = {'symbol': 'CRCL', 'asset_class': 'US equity', 'quote': {'price': 80},
+             'technicals': {'ma20': 90, 'ma60': 70, 'levels_reference_price': 80},
+             'fundamentals': {'market_cap': 100}, 'news': [], 'social': None}
+    claims = {key: {'text': '等待确认并限制单次风险预算', 'evidence': ['technical:price_ma20']}
+              for key in AI_FIELDS}
+    claims['valuation'] = {'text': '无法判断估值是否被基本面支撑，快照仅作参照', 'evidence': ['fundamentals']}
+    calls = []
+
+    def generate(*args, **kwargs):
+        calls.append(1)
+        return SimpleNamespace(text=json.dumps(claims), model='SYNTHETIC', provider='SYNTHETIC')
+
+    report = object.__new__(PersonalInvestmentReport)
+    report._analyzer = SimpleNamespace(generate_text_with_metadata=generate)
+    assert report.interpret(facts)['status'] == 'generated'
+    assert len(calls) == 1  # No paid wording retry for a valid financial phrase.
 
 
 def test_ai_rejects_unknown_evidence_reference():
